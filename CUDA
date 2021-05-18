@@ -1,0 +1,202 @@
+#include <cstdlib>
+#include <time.h>
+#include <cuda.h>
+#include <iostream>
+#include <stdio.h>
+#include <sys/time.h>
+using namespace std;
+#define BLOCK_SIZE 16
+int const N = 127;  //if N>127, the code may be wrong
+
+//cpu
+double gauscpu(double A[N][N], double b[N], double x[N])
+{
+    double vector[N * (N + 1)];
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < N+1; j++)
+        {
+            vector[i * (N + 1) + j] = A[i][j];
+            if (j==N)
+            {
+                vector[i * (N + 1) + j] = b[i];
+            }         
+        }
+    }
+      
+
+    double c;
+    for (int k = 0; k < N - 1; k++)
+    {
+        for (int i = k + 1; i < N; i++)
+        {
+            c = vector[i * (N+1) + k] / vector[k * (N+1) + k];
+            //b[i] = b[i] - c * b[k];
+            for (int j = k; j < N+1; j++)
+            {
+               vector[i * (N+1) + j] = vector[i * (N + 1) + j] - c * vector[k * (N + 1) + j];
+            }
+        }
+    }
+      x[N - 1] = vector[N*N+N-1] / vector[N * (N+1) - 2];  //b[i]=A[i][N]=vector[i*(N+1)+N]
+      for (int i = N - 2; i >= 0; i--)
+
+      {
+          double sum = 0;
+          for (int j = i + 1; j < N; j++)
+          {
+              sum = sum + vector[i * (N+1) + j] * x[j];
+          }
+              x[i] = (vector[i * (N + 1)+N] - sum) / vector[i * (N+1) + i];
+      }
+    return 0;
+}
+
+//gpu
+__global__ void gausgpu_step(double* gvector, int n) 
+{
+  //n: times of elimination
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  int j = blockIdx.y * blockDim.y + threadIdx.y; 
+  
+  if (i < N && i > n && j < (N+1) && j >= n  )
+   {
+
+     gvector[i*(N+1)+j]=gvector[i*(N+1)+j]-(gvector[i*(N+1)+n] / gvector[n*(N+1)+n]) * gvector[n*(N+1)+j];
+
+   }
+
+}
+
+double gausgpu(double A[N][N], double b[N],double x[N])
+{
+      double *vector;
+    vector= (double *) malloc(N*(N+1)*sizeof(double));
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < N+1; j++)
+        {
+        vector[i * (N+1) + j] = A[i][j];
+          if(j==N)
+          { 
+            vector[i * (N+1) + j] =b[i];
+          }
+                        
+        }
+    }
+
+//check 
+/*
+for(int i=0;i<N;i++)
+{
+ 
+  for( int j=0;j<N+1;j++)
+  {
+    cout<<vector[i*(N+1)+j]<<" ";
+  }
+   cout<<endl;
+}*/
+
+    //invoke gpu
+    double *gvector;
+     cudaMalloc((double **)&gvector, N*(N+1)*sizeof(double));
+     cudaMemcpy(gvector, vector, N*(N+1)*sizeof(double), cudaMemcpyHostToDevice);
+    dim3 dimBlock(BLOCK_SIZE,BLOCK_SIZE);
+    dim3 dimGrid(ceil((N+1+dimBlock.x) / dimBlock.x),ceil((N+10+dimBlock.y) / dimBlock.y));
+    
+        for(int i = 0; i < N - 1; i++)
+    {
+     //int n = i;
+ //__syncthreads();
+      gausgpu_step<<<dimGrid, dimBlock>>>(gvector,i);
+      // cudaThreadSynchronize();
+    }
+
+    double *temp;
+    temp = (double *) malloc(N*(N+1)*sizeof(double));
+    cudaMemcpy(temp, gvector, N*(N+1)*sizeof(double), cudaMemcpyDeviceToHost);
+    
+    
+    //check
+    /*for(int i=0;i<N;i++)
+{
+ 
+  for( int j=0;j<N+1;j++)
+  {
+   if (temp[i*(N+1)+j]<1e-8&&temp[i*(N+1)+j]>-1e-8)
+   {cout<<"0 ";}
+   else
+    cout<<temp[i*(N+1)+j]<<" ";
+  }
+   cout<<endl;
+}*/
+
+   x[N-1]=temp[N*N+N-1]/temp[N*(N+1)-2];
+
+      for (int i = N - 2; i >= 0; i--)
+      {
+          double sum = 0;
+          for (int j = i + 1; j < N; j++)
+          {
+              sum = sum + temp[i * (N+1) + j] * x[j];
+          }
+          x[i] = (temp[i * (N + 1)+N] - sum) / temp[i * (N+1) + i];
+         //x[i] = (b[i] - sum) / vector[i * N + i];
+
+
+      }
+free(temp);
+free(vector);
+cudaFree(gvector);
+   return 0;
+}
+
+
+int main()
+{
+
+   double A[N][N],b[N],x1[N],x2[N];
+   
+   
+        for (int i = 0; i < N; i++)
+        {
+            b[i] = 1.2 * (rand() / double(RAND_MAX));
+        }
+    for (int i = 0; i<N;i++)
+    {
+      for (int j = 0; j<N;j++)
+      {
+         A[i][j]= 3* (rand() / double(RAND_MAX))-0.2;
+      }
+    }
+
+/* check A[][] and b[]
+for(int i=0;i<N;i++)
+{
+ 
+  for( int j=0;j<N;j++)
+  {
+    cout<<A[i][j]<<" ";
+  }
+   cout<<endl;
+}
+
+/*
+for(int i=0;i<N;i++)
+{
+     cout<<b[i]<<endl;
+}*/
+
+    gauscpu(A,b,x1);
+    gausgpu(A,b,x2);
+
+    cout << "N = " << N <<"   BLOCK_SIZE= "<<BLOCK_SIZE << endl;      
+    cout << "cpu     " << "  gpu" << endl;      
+     for (int i = 0; i < N; i++)
+     {cout<<x1[i]<<"   "<<x2[i]<<endl;}
+
+
+
+return 0;
+}
+
